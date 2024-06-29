@@ -24,7 +24,6 @@ model.summary()
 
 import tensorflow as tf
 import keras
-import numpy as np
 from typing import Any
 
 
@@ -58,6 +57,26 @@ class TokenAndPositionEmbedding(keras.layers.Layer):
     def call(self, values, *args, **kwargs):
         """Returns the token plus position embedding values"""
         return self.tok_embedding(values, *args, **kwargs) + self.pos_embedding(self._positions, *args, **kwargs)
+
+
+class InverseTokenEmbedding(keras.layers.Layer):
+    """
+    Create the inverse of a Token embedding layer:
+    re-use the weights from an existing token embedding as a Dense layer with no bias
+    This goes from an internal latent space back to the vocabulary
+    It's intended to be used as the last layer in a GPT model
+    """
+    def __init__(self, token_embedding_layer: TokenAndPositionEmbedding, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self._token_embedding_layer = token_embedding_layer
+
+    def call(self, values, *args, **kwargs) -> tf.Tensor:
+        """
+        Dense layer computation but re-using the weights from the token embedding given when this
+        layer is created
+        """
+        # (T, C) x (V, C).transpose => (T, V)
+        return tf.matmul(values, self._token_embedding_layer.tok_embedding.weights[0], transpose_b=True)
 
 
 class TransformerDecoder(keras.layers.Layer):
