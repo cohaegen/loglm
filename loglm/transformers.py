@@ -23,6 +23,8 @@ model.summary()
 """
 
 import tensorflow as tf
+from tensorflow.python.eager import context
+from tensorflow.python.ops import standard_ops, math_ops
 import keras
 from typing import Any
 
@@ -59,24 +61,41 @@ class TokenAndPositionEmbedding(keras.layers.Layer):
         return self.tok_embedding(values, *args, **kwargs) + self.pos_embedding(self._positions, *args, **kwargs)
 
 
-class InverseTokenEmbedding(keras.layers.Layer):
+class InvertibleEmbedding(keras.layers.Embedding):
     """
-    Create the inverse of a Token embedding layer:
-    re-use the weights from an existing token embedding as a Dense layer with no bias
-    This goes from an internal latent space back to the vocabulary
-    It's intended to be used as the last layer in a GPT model
-    """
-    def __init__(self, token_embedding_layer: TokenAndPositionEmbedding, *args, **kwargs) -> None:
-        super().__init__(*args, **kwargs)
-        self._token_embedding_layer = token_embedding_layer
+    This is an embedding layer that can perform the inverse operation:
+    In the normal case, it acts just like a keras.layers.Embedding layer with input size V and output size C
+    If invert=True is passed when calling the layer, then it acts like a Dense layer using the transpose of
+    the embeddings matrix as the Dense kernel, with input C and output V.
 
-    def call(self, values, *args, **kwargs) -> tf.Tensor:
+    This layer can be used in GPTs to re-use weights. For example, in the GPT-2 paper
+    (https://cdn.openai.com/better-language-models/language_models_are_unsupervised_multitask_learners.pdf),
+    the weights in the embedding layer at the beginning of the model are re-used in the output Dense layer.
+    """
+    def __init__(self, *args, **kwargs):
+        """Initialize the layer"""
+        super().__init__(*args, **kwargs)
+
+    def call(self, inputs: tf.Tensor, invert: bool=False) -> tf.Tensor:
         """
-        Dense layer computation but re-using the weights from the token embedding given when this
-        layer is created
+        Call the layer. To use it just like a keras Embedding layer, call it without any options.
+        To use it in the inverse mode as a Dense layer, call it with invert=True.
         """
-        # (T, C) x (V, C).transpose => (T, V)
-        return tf.matmul(values, self._token_embedding_layer.tok_embedding.weights[0], transpose_b=True)
+        if invert:
+            if inputs.dtype.base_dtype != self._compute_dtype_object.base_dtype:
+                inputs = math_ops.cast(inputs, dtype=self._compute_dtype_object)
+
+            rank = inputs.shape.rank
+            emb_transpose = standard_ops.transpose_v2(self.embeddings)
+            outputs = standard_ops.tensordot(inputs, emb_transpose, [[rank - 1], [0]])
+            # Reshape the output back to the original ndim of the input.
+            if not context.executing_eagerly():
+                shape = inputs.shape.as_list()
+                output_shape = shape[:-1] + [emb_transpose.shape[-1]]
+                outputs.set_shape(output_shape)
+            return outputs
+        else:
+          return super().call(inputs)
 
 
 class TransformerDecoder(keras.layers.Layer):
@@ -87,7 +106,7 @@ class TransformerDecoder(keras.layers.Layer):
 
     It requires inputs that have position embeddings
 
-    The Decoder, uses a causal mask. This means that "future" tokens are masked and the model cannot use them when
+    The Decoder uses a causal mask. This means that "future" tokens are masked and the model cannot use them when
     doing its prediction. Use this layer for time-series prediction because it will prevent the model from cheating
     by looking at future tokens.
     """

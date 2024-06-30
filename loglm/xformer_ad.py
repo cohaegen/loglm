@@ -1,6 +1,7 @@
 from dataclasses import dataclass
+import tensorflow as tf
 import keras
-from .transformers import TransformerDecoder, TokenAndPositionEmbedding, InverseTokenEmbedding
+from .transformers import TransformerDecoder, TokenAndPositionEmbedding, InvertibleEmbedding
 
 
 @dataclass
@@ -13,15 +14,25 @@ class XFormerADConfig:
     vocabulary_size: int
 
 
-class XformerAD(keras.Sequential):
-    def __init__(self, config: XFormerADConfig):
-        super().__init__()
-        self.add(keras.layers.Input(config.context_size,))
-        token_and_pos_embedding = TokenAndPositionEmbedding(config.vocabulary_size,
-                                                            config.num_heads*config.head_size)
-        self.add(token_and_pos_embedding)
+class XformerAD(keras.Model):
+    def __init__(self, config: XFormerADConfig) -> None:
+        # Input is a tensor of integers that represent token IDs. The shape is the length of the context window we're using
+        inp = keras.layers.Input((config.context_size,))
+        # Create token and position embeddings and add them.
+        # The token embedding is invertible because we will re-use it at the end of the model.
+        tok_embedding = InvertibleEmbedding(config.vocabulary_size,
+                                            config.num_heads*config.head_size)
+        # Just use static values for the positions
+        positions = tf.range(config.context_size)
+        pos_embedding = keras.layers.Embedding(config.context_size,
+                                               config.num_heads*config.head_size)
+        layer = tok_embedding(inp) + pos_embedding(positions)
+        # Add transformer decoder layers. They comprise an attention block and Dense layer. They use a causal mask.
         for _ in range(config.num_layers):
-            self.add(TransformerDecoder(config.num_heads, config.head_size, config.dropout))
-        self.add(keras.layers.LayerNormalization())
-        self.add(InverseTokenEmbedding(token_and_pos_embedding))
-        self.add(keras.layers.Dense(config.vocabulary_size))
+            layer = TransformerDecoder(config.num_heads, config.head_size, config.dropout)(layer)
+        # Layer norm before finishing
+        layer = keras.layers.LayerNormalization()(layer)
+        # This is the final step: instead of a Dense layer, we're re-using the weights from the token embedding.
+        layer = tok_embedding(layer, invert=True)
+        # Initialize as a keras.Model
+        super().__init__(inputs=inp, outputs=layer)
